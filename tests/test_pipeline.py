@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pii
 import categorical as cat
+import embeddings as emb
 
 
 # ── PII gate (§5.1) ───────────────────────────────────────────────────────────
@@ -78,6 +79,50 @@ def test_tfidf_block_pools_fields_and_l2_normalizes():
     # namespaced tokens present in the pooled vocabulary
     assert any(t.startswith("issue=") for t in vec.vocabulary_)
     assert any(t.startswith("sub=") for t in vec.vocabulary_)
+
+
+# ── Token-aware embedding batching (§1.4) ─────────────────────────────────────
+
+def _count(text, encoder):
+    return emb._prepare_text(text, encoder)[1]
+
+
+def test_prepare_text_caps_per_input_tokens():
+    enc = emb._get_encoder()
+    huge = "word " * 40000                         # ~40k tokens of input
+    text, n = emb._prepare_text(huge, enc)
+    assert n <= emb.MAX_INPUT_TOKENS
+    assert len(text) <= emb.MAX_INPUT_CHARS
+
+
+def test_batches_respect_token_budget_and_item_cap():
+    enc = emb._get_encoder()
+    # 500 fat inputs (~6k tokens each) → many would blow a 128-item request
+    items = [(i, "lorem ipsum " * 2000) for i in range(500)]
+    max_items = 128
+    seen = []
+    for batch in emb._token_aware_batches(iter(items), enc, max_items):
+        assert 1 <= len(batch) <= max_items
+        tok = sum(_count(t, enc) for _, t in batch)
+        assert tok <= emb.MAX_REQUEST_TOKENS, f"batch of {tok} tokens exceeds budget"
+        seen.extend(idx for idx, _ in batch)
+    assert seen == list(range(500))               # every item emitted exactly once, in order
+
+
+def test_batches_handle_single_oversized_input():
+    enc = emb._get_encoder()
+    items = [(0, "x " * 100000)]                   # one input far over every limit
+    batches = list(emb._token_aware_batches(iter(items), enc, 128))
+    assert len(batches) == 1 and len(batches[0]) == 1
+    assert _count(batches[0][0][1], enc) <= emb.MAX_INPUT_TOKENS
+
+
+def test_heuristic_fallback_when_no_encoder():
+    # encoder=None forces the chars/4 path; batches must still respect the budget
+    items = [(i, "a" * 40000) for i in range(50)]
+    for batch in emb._token_aware_batches(iter(items), None, 128):
+        tok = sum(emb._prepare_text(t, None)[1] for _, t in batch)
+        assert tok <= emb.MAX_REQUEST_TOKENS
 
 
 if __name__ == "__main__":
