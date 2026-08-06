@@ -47,9 +47,15 @@ tickets), so coverage can't trivially sit near 100% for every combo.
 
 ```bash
 pip install -r requirements.txt
-export OPENAI_API_KEY=...        # read from env only — never hardcoded
-export ANTHROPIC_API_KEY=...
+
+# API keys are read from the environment only — never hardcoded or committed.
+cp .env.example .env             # then fill in your real keys
+set -a; source .env; set +a      # load them into the current shell
 ```
+
+`.env` is git-ignored; `.env.example` is the committed template. It holds two keys:
+`OPENAI_API_KEY` (embeddings, §1.4) and `ANTHROPIC_API_KEY` (naming/category/judge, §2).
+If you prefer, `export OPENAI_API_KEY=... ANTHROPIC_API_KEY=...` by hand instead of sourcing `.env`.
 
 Place the two Power BI exports in `data/` (git-ignored — large and may contain PII):
 `Tickets Mercor v3.xlsx`, `Time entries Mercor v3.xlsx`.
