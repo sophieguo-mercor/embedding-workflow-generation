@@ -84,8 +84,11 @@ NAMING_NEAREST = 8              # centroid-nearest members shown to the namer
 NAMING_DIVERSE = 4              # plus a few diverse (far / random) members
 
 # ── Models ───────────────────────────────────────────────────────────────────
-EMBED_MODEL = "voyage-3-large"          # multilingual — no translation step
-EMBED_DIM = 1024                        # voyage-3-large default output dim
+EMBED_MODEL = "text-embedding-3-large"  # OpenAI; handles Dutch/English — no translation
+# text-embedding-3-large is natively 3072-d; we request a reduced 1024-d via the
+# OpenAI `dimensions` param for memory parity with clustering (raise to 3072 for
+# max fidelity — expect ~3x the embedding cache + per-combo feature-matrix RAM).
+EMBED_DIM = 1024
 LLM_MODEL = "claude-sonnet-4-6"         # naming / category / coherence judge
 
 # ── Paths ────────────────────────────────────────────────────────────────────

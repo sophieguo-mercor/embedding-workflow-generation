@@ -7,7 +7,7 @@ install:
 records:
 	python run.py --stage records
 
-# Full field-combo sweep (§2) — requires VOYAGE_API_KEY + ANTHROPIC_API_KEY
+# Full field-combo sweep (§2) — requires OPENAI_API_KEY + ANTHROPIC_API_KEY
 sweep:
 	python run.py --stage sweep
 

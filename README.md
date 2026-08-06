@@ -18,7 +18,7 @@ bake-off itself is out of scope here).
 | Stage | Module | What it does |
 |------|--------|--------------|
 | **1. Records** (§1) | `records.py` | Join Tickets + Time-entries on `(instance, ticketnumber)`; one feature-ready record per ticket (`title`, `description`, `notes`, `issue_type`, `sub_issue_type`, `hours`, `touches`). Drops text-poor tickets; identifiers/dates/person-IDs never enter features. |
-| **1.4 Semantic block** | `embeddings.py` | Embed `title`/`description`/`notes` separately with `voyage-3-large` (multilingual — no translation). Cached per `(ticket_id, field)` so re-runs never re-embed. |
+| **1.4 Semantic block** | `embeddings.py` | Embed `title`/`description`/`notes` separately with OpenAI `text-embedding-3-large` (handles Dutch/English — no translation; reduced to 1024-d via the `dimensions` param). Cached per `(ticket_id, field)` so re-runs never re-embed. |
 | **1.5 Categorical block** | `categorical.py`, `synonyms.json` | Normalize `issue_type`/`sub_issue_type` (rule-based canonicalization + curated synonym map), pool into namespaced tokens (`issue=… sub=…`), `TfidfVectorizer(min_df=2, smooth_idf=True)`, L2-normalize. |
 | **2. Sweep** (§2) | `sweep.py`, `prompts.py`, `llm.py` | For each hand-picked weight combo `(w_title, w_desc, w_notes, w_cat)`: build the combined vector, pick `k` by silhouette (within-combo only), KMeans, name each cluster (1 LLM call → title/description/coherence flag), batched category pass, hours-weighted coverage + a blind combo-comparable LLM coherence/distinctness score. |
 | **3. Human review** (§3) | `results/sweep_summary.json` | All combos laid out side by side — coverage, LLM score, `k`, cluster count, named clusters. A human picks `combo*`. |
@@ -47,7 +47,7 @@ tickets), so coverage can't trivially sit near 100% for every combo.
 
 ```bash
 pip install -r requirements.txt
-export VOYAGE_API_KEY=...        # read from env only — never hardcoded
+export OPENAI_API_KEY=...        # read from env only — never hardcoded
 export ANTHROPIC_API_KEY=...
 ```
 

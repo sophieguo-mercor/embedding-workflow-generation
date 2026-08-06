@@ -2,16 +2,17 @@
 """
 Section 1.4 — Semantic feature block.
 
-Embed `title`, `description`, `notes` separately with voyage-3-large
-(multilingual — no translation step needed). Embeddings are cached per
-(ticket_id, field) on disk so re-running the sweep never re-embeds.
+Embed `title`, `description`, `notes` separately with OpenAI's
+text-embedding-3-large (handles Dutch/English — no translation step needed).
+Embeddings are cached per (ticket_id, field) on disk so re-running the sweep
+never re-embeds.
 
 Cache layout (one .npz per field):
     cache/emb_title.npz  cache/emb_description.npz  cache/emb_notes.npz
 Each stores parallel arrays: `ids` (str) and `vecs` (float32, n×dim). A field's
 empty-text tickets get a zero vector (and are still cached, so we never re-ask).
 
-The VOYAGE_API_KEY is read from the environment only — never hardcoded.
+The OPENAI_API_KEY is read from the environment only — never hardcoded.
 """
 from __future__ import annotations
 
@@ -43,15 +44,18 @@ def _save_cache(field: str, cache_dir: str, cache: dict[str, np.ndarray]) -> Non
     np.savez(_cache_path(field, cache_dir), ids=ids, vecs=vecs)
 
 
-def _voyage_client():
+MAX_INPUT_CHARS = 24000  # defensive truncation — keep under the 8191-token cap
+
+
+def _openai_client():
     try:
-        import voyageai  # noqa: F401
+        import openai  # noqa: F401
     except ImportError:
-        raise SystemExit("pip install voyageai")
-    if not os.environ.get("VOYAGE_API_KEY"):
-        raise SystemExit("Set VOYAGE_API_KEY in your environment.")
-    import voyageai
-    return voyageai.Client()  # reads VOYAGE_API_KEY from env
+        raise SystemExit("pip install openai")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit("Set OPENAI_API_KEY in your environment.")
+    from openai import OpenAI
+    return OpenAI()  # reads OPENAI_API_KEY from env
 
 
 def embed_field(
@@ -86,12 +90,13 @@ def embed_field(
             v = np.random.default_rng(seed).standard_normal(dim).astype(np.float32)
             cache[ids[i]] = v / (np.linalg.norm(v) or 1.0)
     elif todo_idx:
-        client = _voyage_client()
+        client = _openai_client()
         for s in range(0, len(todo_idx), batch_size):
             chunk = todo_idx[s:s + batch_size]
-            resp = client.embed([texts[i] for i in chunk], model=model, input_type="document")
-            for i, emb in zip(chunk, resp.embeddings):
-                cache[ids[i]] = np.asarray(emb, dtype=np.float32)
+            inputs = [texts[i][:MAX_INPUT_CHARS] for i in chunk]
+            resp = client.embeddings.create(model=model, input=inputs, dimensions=C.EMBED_DIM)
+            for i, d in zip(chunk, resp.data):
+                cache[ids[i]] = np.asarray(d.embedding, dtype=np.float32)
             if (s // batch_size) % 10 == 0:
                 log(f"[embed:{field}]   {min(s + batch_size, len(todo_idx)):,}/{len(todo_idx):,}")
         _save_cache(field, cache_dir, cache)

@@ -16,7 +16,7 @@ Stages
 
 Usage
 -----
-    export VOYAGE_API_KEY=...   ANTHROPIC_API_KEY=...
+    export OPENAI_API_KEY=...   ANTHROPIC_API_KEY=...
     pip install -r requirements.txt
 
     # Smoke test end-to-end with NO API spend (stub embeddings/LLM, tiny sample):
