@@ -45,13 +45,19 @@ tickets), so coverage can't trivially sit near 100% for every combo.
 
 ## Setup
 
+Use a virtual environment (the `.venv/` directory is git-ignored, so it never gets committed):
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 # API keys are read from the environment only — never hardcoded or committed.
 cp .env.example .env             # then fill in your real keys
 set -a; source .env; set +a      # load them into the current shell
 ```
+
+Re-activate with `source .venv/bin/activate` in any new shell before running the pipeline.
 
 `.env` is git-ignored; `.env.example` is the committed template. It holds two keys:
 `OPENAI_API_KEY` (embeddings, §1.4) and `ANTHROPIC_API_KEY` (naming/category/judge, §2).
