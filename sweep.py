@@ -32,6 +32,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
 
 import config as C
+import metrics
 from categorical import build_categorical_block
 from embeddings import embed_all_semantic
 from llm import LLM
@@ -117,27 +118,8 @@ def sample_cluster_members(X, labels, cluster_id, centroid, records, rng) -> lis
     } for i in chosen]
 
 
-# ── coverage (§2 step 6) ──────────────────────────────────────────────────────
-
-def mass_weighted_coverage(clusters: list[dict], total_hours: float) -> dict:
-    """% of engineer-hours in named, coherent, big-enough clusters vs "Other".
-
-    total_hours is the WHOLE corpus (incl. text-poor drops), so coverage can't
-    trivially sit near 100%."""
-    covered = 0.0
-    n_named = 0
-    for c in clusters:
-        if c["qualifies"]:
-            covered += c["hours"]
-            n_named += 1
-    frac = covered / total_hours if total_hours else 0.0
-    return {
-        "coverage": round(frac, 4),
-        "covered_hours": round(covered, 2),
-        "total_hours": round(total_hours, 2),
-        "n_named_clusters": n_named,
-        "n_clusters": len(clusters),
-    }
+# ── coverage / the "Other" gate / judge selection live in metrics.py ──────────
+# (shared across every method so the bake-off compares like with like — §2 step 6)
 
 
 # ── one combo end-to-end ──────────────────────────────────────────────────────
@@ -152,16 +134,33 @@ def run_combo(
     llm: LLM,
     *,
     out_dir: str,
+    fixed_k: int | None = None,
     log=print,
 ) -> dict:
     log(f"\n══ combo '{name}' weights={combo} ══", )
     X = combine(combo, sem_l2, cat_block)
     log(f"  combined feature dim: {X.shape[1]}")
 
-    best_k, sil_scores = choose_k(X, log=log)
+    if fixed_k is not None:
+        n = X.shape[0]
+        if not 2 <= fixed_k <= n - 1:
+            raise ValueError(f"fixed_k={fixed_k} out of range [2, {n - 1}] for n={n}")
+        best_k = fixed_k
+        log(f"  using fixed k={best_k} (skipping silhouette k-sweep)")
+        sil_scores = None  # single-k silhouette filled in after the fit below
+    else:
+        best_k, sil_scores = choose_k(X, log=log)
+
     km = KMeans(n_clusters=best_k, n_init=C.KMEANS_N_INIT, random_state=C.KMEANS_SEED)
     labels = km.fit_predict(X)
     centroids = km.cluster_centers_
+
+    if sil_scores is None:  # fixed_k path — score just the chosen k for the artifact
+        sample_size = min(C.SILHOUETTE_SAMPLE, X.shape[0])
+        sil = silhouette_score(X, labels, sample_size=sample_size, random_state=C.KMEANS_SEED) \
+            if len(set(labels)) > 1 else -1.0
+        sil_scores = {best_k: float(sil)}
+        log(f"  silhouette at k={best_k}: {sil_scores[best_k]:.4f}")
 
     hours = np.array([r.hours for r in records], dtype=np.float64)
     rng = random.Random(C.KMEANS_SEED)
@@ -178,9 +177,6 @@ def run_combo(
         samples = sample_cluster_members(X, labels, cid, centroids[cid], records, rng)
         named = llm.name_cluster(samples, cluster_id=cid)
 
-        big_enough = n_tickets >= C.MIN_CLUSTER_TICKETS and hours_frac >= C.MIN_CLUSTER_MASS_FRAC
-        qualifies = bool(named["coherent"]) and big_enough  # §2.6 "Other" gate
-
         cluster = {
             "cluster_id": cid,
             "title": named["title"],
@@ -189,11 +185,13 @@ def run_combo(
             "coherence_note": named["coherence_note"],
             "n_tickets": n_tickets,
             "hours": round(cl_hours, 2),
-            "hours_frac": round(hours_frac, 4),
-            "big_enough": big_enough,
-            "qualifies": qualifies,
+            "hours_frac": hours_frac,   # full precision for the gate; rounded below
+            "big_enough": False,        # both set by metrics.mark_qualification
+            "qualifies": False,
             "examples": [s["title"] or s["notes"][:120] for s in samples[:3]],
         }
+        metrics.mark_qualification(cluster)   # §2.6 "Other" gate (shared)
+        cluster["hours_frac"] = round(hours_frac, 4)   # round for the artifact
         clusters.append(cluster)
         named_for_cat.append({"id": cid, "title": named["title"], "description": named["description"]})
 
@@ -205,13 +203,9 @@ def run_combo(
 
     # §2.6 — combo-level coherence/distinctness judge (blind, combo-comparable)
     log("  scoring combo coherence/distinctness (LLM judge) …")
-    judge_input = [{"title": c["title"], "description": c["description"], "examples": c["examples"]}
-                   for c in clusters if c["qualifies"]] or \
-                  [{"title": c["title"], "description": c["description"], "examples": c["examples"]}
-                   for c in clusters]
-    llm_score = llm.coherence_judge(judge_input)
+    llm_score = llm.coherence_judge(metrics.select_judge_clusters(clusters))
 
-    cov = mass_weighted_coverage(clusters, total_hours)
+    cov = metrics.mass_weighted_coverage(clusters, total_hours)
     log(f"  coverage={cov['coverage']:.1%}  "
         f"llm_overall={llm_score['overall']:.1f}  k={best_k}  "
         f"named={cov['n_named_clusters']}/{cov['n_clusters']}")
@@ -234,7 +228,7 @@ def run_combo(
 
 
 def run_sweep(records, total_hours, *, combos=None, dry_run=False,
-              out_dir=f"{C.RESULTS_DIR}/combos", log=print) -> dict:
+              out_dir=f"{C.RESULTS_DIR}/combos", fixed_k=None, log=print) -> dict:
     """Run every combo and write a side-by-side summary (Section 3 input)."""
     combos = combos or C.WEIGHT_VECTORS
     sem_l2, cat_block = build_feature_blocks(records, dry_run=dry_run, log=log)
@@ -243,7 +237,7 @@ def run_sweep(records, total_hours, *, combos=None, dry_run=False,
     summary = []
     for name, combo in combos.items():
         art = run_combo(name, combo, sem_l2, cat_block, records, total_hours,
-                        llm, out_dir=out_dir, log=log)
+                        llm, out_dir=out_dir, fixed_k=fixed_k, log=log)
         summary.append({
             "combo": name,
             "weights": art["weights"],
