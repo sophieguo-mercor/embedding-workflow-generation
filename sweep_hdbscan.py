@@ -334,6 +334,13 @@ def run_sweep_hdbscan(records, total_hours, *, weight_configs=None,
     min_cluster_sizes = min_cluster_sizes or C.HDBSCAN_MIN_CLUSTER_SIZES
     out_dir = out_dir or f"{C.RESULTS_DIR}/hdbscan/configs"
 
+    # Merge §1.5 normalized fields onto the records from normalize.py's durable
+    # cache, if it exists — this is what makes the normalized_* configs runnable
+    # (they skip when the cache is absent). Paid once by normalize.py, reused here.
+    if Path(C.NORMALIZE_CACHE).exists():
+        from normalize import attach_normalized
+        attach_normalized(records, log=log)
+
     needed = sorted({b for w in weight_configs.values() for b, v in w.items() if v > 0})
     blocks = build_feature_blocks(records, needed, dry_run=dry_run, log=log)
     llm = LLM(dry_run=dry_run)

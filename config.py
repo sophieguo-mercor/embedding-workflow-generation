@@ -164,3 +164,15 @@ BATCH_CHAR_LIMIT = 1500                     # per-description char cap sent to t
 BATCH_MAX_TOKENS = 4096                     # response cap per request
 DESC_CLEAN_CACHE = "cache/desc_clean.jsonl"        # {id, text} per cleaned ticket
 DESC_BATCH_MANIFEST = "cache/desc_batch_manifest.json"  # in-flight batch (resume)
+
+# ── LLM intent normalization (normalize.py, ENT-2289 §1.5) ────────────────────
+# One Message-Batch call per ticket over title + cleaned description + cleaned
+# notes → normalized_issue / normalized_resolution (English). This is the biggest
+# NEW cost line (~154k tickets), so it is batched + cached; the cache survives
+# across sweep runs so the cost is paid once, not per config.
+NORMALIZE_MODEL = "claude-haiku-4-5-20251001"   # cheap, high-throughput (ticket §1.5)
+NORMALIZE_BATCH_SIZE = 10             # tickets/request (3 fields each → smaller than §1.4)
+NORMALIZE_CHAR_LIMIT = 1200           # per-field char cap sent to the model
+NORMALIZE_MAX_TOKENS = 4096           # response cap per request
+NORMALIZE_CACHE = "cache/normalize.jsonl"              # {id, issue, resolution} per ticket
+NORMALIZE_BATCH_MANIFEST = "cache/normalize_batch_manifest.json"  # in-flight batch (resume)

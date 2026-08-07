@@ -39,6 +39,12 @@ class TicketRecord:
     sub_issue_type: str
     hours: float            # coverage weight
     touches: int            # number of time entries
+    # §1.5 (ENT-2289) intent normalization — populated by normalize.py, cached in
+    # cache/normalize.jsonl and merged back via normalize.attach_normalized(). Left
+    # "" by the join itself; kept alongside the raw fields so the sweep can ablate
+    # normalized vs. raw. Defaults keep old records.jsonl loadable unchanged.
+    normalized_issue: str = ""
+    normalized_resolution: str = ""
 
 
 def _clean_text(v) -> str:
