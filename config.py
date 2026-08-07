@@ -132,6 +132,18 @@ CTFIDF_TOP_N = 10               # distinctive terms kept per cluster (auditable)
 HDBSCAN_NAMING_EXEMPLARS = 8    # highest-probability members shown to the namer
 HDBSCAN_NAMING_DIVERSE = 4      # plus a few diverse members
 
+# ── Bootstrap stability (§4) ──────────────────────────────────────────────────
+# HDBSCAN is deterministic (UMAP seed fixed), so ENT-2261's reseed-ARI check tests
+# nothing here. Instead resample tickets with replacement, re-cluster, and measure
+# whether each workflow reappears (Hennig's clusterboot, per-cluster Jaccard) —
+# the property that matters for an artifact meant to classify FUTURE tickets.
+HDBSCAN_N_BOOTSTRAP = 15        # bootstrap resamples of config* (compute vs. confidence)
+# Conventional reading of mean per-cluster Jaccard (Hennig): flag low ones for the
+# reviewer, never silently drop them.
+JACCARD_STABLE = 0.75           # > this: stable, a genuine reappearing pattern
+JACCARD_DOUBTFUL = 0.60         # [DOUBTFUL, STABLE): pattern present, membership doubtful
+#                                 < JACCARD_DOUBTFUL: do not trust the cluster
+
 # ── Models ───────────────────────────────────────────────────────────────────
 EMBED_MODEL = "text-embedding-3-large"  # OpenAI; handles Dutch/English — no translation
 # text-embedding-3-large is natively 3072-d; we request a reduced 1024-d via the

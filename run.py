@@ -149,21 +149,26 @@ def _load_combo_artifact(name: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _reject_hdbscan_finalization(args, what: str) -> None:
-    if args.method == "hdbscan":
-        raise SystemExit(
-            f"{what} for --method hdbscan is not wired yet. HDBSCAN needs the §4 "
-            f"bootstrap/Jaccard stability check (not the k-means reseed-ARI one) "
-            f"and a §5 finalize that reads the hdbscan config-artifact shape. Use "
-            f"--method kmeans, or finalize the hdbscan artifact manually for v1.")
+def _load_hdbscan_artifact(name: str) -> dict:
+    p = Path(f"{C.RESULTS_DIR}/hdbscan/configs/{name}.json")
+    if not p.exists():
+        raise SystemExit(f"No hdbscan config artifact at {p}. Run "
+                         f"`--stage sweep --method hdbscan` first.")
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def stage_stability(args):
-    from stability import stability_check
-    _reject_hdbscan_finalization(args, "Stability")
     if not args.select:
-        raise SystemExit("--select <combo> is required for the stability stage.")
+        raise SystemExit("--select <config> is required for the stability stage.")
     recs, _ = load_or_build_records(args)
+    if args.method == "hdbscan":
+        from stability_hdbscan import stability_check_hdbscan
+        art = _load_hdbscan_artifact(args.select)
+        log("Stage 4 — Bootstrap stability (ENT-2289)", section=True)
+        return stability_check_hdbscan(
+            recs, art, dry_run=args.dry_run,
+            allow_reducer_fallback=args.allow_reducer_fallback, log=log)
+    from stability import stability_check
     art = _load_combo_artifact(args.select)
     log("Stage 3 — Stability check", section=True)
     return stability_check(recs, art, dry_run=args.dry_run, log=log)
@@ -172,7 +177,11 @@ def stage_stability(args):
 def stage_finalize(args):
     from stability import stability_check
     from finalize import finalize
-    _reject_hdbscan_finalization(args, "Finalize")
+    if args.method == "hdbscan":
+        raise SystemExit(
+            "Finalize for --method hdbscan is not wired yet (the §5 freeze must read "
+            "the hdbscan config-artifact shape). Stability (§4) IS available for "
+            "hdbscan; finalize the artifact manually, or use --method kmeans for v1.")
     if not args.select:
         raise SystemExit("--select <combo> is required for the finalize stage.")
     recs, meta = load_or_build_records(args)
