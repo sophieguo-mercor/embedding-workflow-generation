@@ -175,21 +175,27 @@ def stage_stability(args):
 
 
 def stage_finalize(args):
+    if not args.select:
+        raise SystemExit("--select <combo/config> is required for the finalize stage.")
+    recs, meta = load_or_build_records(args)
+
+    if args.method == "hdbscan":
+        from stability_hdbscan import stability_check_hdbscan
+        from finalize import finalize_hdbscan
+        art = _load_hdbscan_artifact(args.select)
+        log("Stage 4 — Bootstrap stability (ENT-2289)", section=True)
+        stab = None if args.skip_stability else stability_check_hdbscan(
+            recs, art, dry_run=args.dry_run,
+            allow_reducer_fallback=args.allow_reducer_fallback, log=log)
+        log("Stage 5 — Finalize (PII gate + freeze)", section=True)
+        finalize_hdbscan(art, meta, stability=stab, log=log)
+        return
+
     from stability import stability_check
     from finalize import finalize
-    if args.method == "hdbscan":
-        raise SystemExit(
-            "Finalize for --method hdbscan is not wired yet (the §5 freeze must read "
-            "the hdbscan config-artifact shape). Stability (§4) IS available for "
-            "hdbscan; finalize the artifact manually, or use --method kmeans for v1.")
-    if not args.select:
-        raise SystemExit("--select <combo> is required for the finalize stage.")
-    recs, meta = load_or_build_records(args)
     art = _load_combo_artifact(args.select)
-
     log("Stage 3 — Stability check", section=True)
     stab = None if args.skip_stability else stability_check(recs, art, dry_run=args.dry_run, log=log)
-
     log("Stage 4 — Finalize (PII gate + freeze)", section=True)
     finalize(art, meta, stability=stab, log=log)
 
