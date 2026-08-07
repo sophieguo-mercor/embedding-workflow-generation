@@ -1,4 +1,8 @@
 # ── Data (large, may contain PII) — never commit ─────────────────────────────
+# Covers the raw exports AND the cleaned twins under data/cleaned/ (clean.py).
+data/**/*.xlsx
+data/**/*.csv
+data/**/*.xls
 data/*.xlsx
 data/*.csv
 data/*.xls
