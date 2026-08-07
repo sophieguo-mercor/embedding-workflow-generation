@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-End-to-end orchestrator for the embedding-based workflow-generation pipeline
-(ENT-2261).
+End-to-end orchestrator for the workflow-generation pipeline. Two clustering
+methods share one spine and are selected with --method:
+  * kmeans  (ENT-2261, default) — field-combo sweep, k chosen by silhouette.
+  * hdbscan (ENT-2289)          — UMAP + HDBSCAN density sweep, + §1.5 normalization.
 
 Stages
 ------
-1. records   — join Tickets + Time-entries → one feature-ready record/ticket (§1)
-2. sweep     — run the field-combo sweep: embed, cluster, name, categorize,
-               score coverage + LLM coherence per combo (§2). Writes side-by-side
-               summary for human review (§3).
-   << human reviews results/sweep_summary.json + results/combos/*.json, picks combo* >>
-3. stability — reseed combo* 2–3× and check ARI (§4)
-4. finalize  — PII-gate + freeze combo* as versioned taxonomy.md/clusters.jsonl/
-               metrics.json in Name|Category|Description shape (§5)
+1.  records   — join Tickets + Time-entries → one feature-ready record/ticket (§1)
+1.5 normalize — (hdbscan) LLM intent normalization → normalized_issue/_resolution,
+                batched + cached in cache/normalize.jsonl (§1.5)
+2.  sweep      — embed, cluster, name, categorize, score coverage + LLM coherence
+                per combo/config (§2). --method picks kmeans or hdbscan. Writes a
+                side-by-side summary for human review (§3).
+    << human reviews the summary + per-combo/config artifacts, picks the winner >>
+3.  stability  — kmeans: reseed 2–3× and check ARI (§4). hdbscan: bootstrap/Jaccard
+                (not yet wired — raises with guidance).
+4.  finalize   — PII-gate + freeze the winner as versioned taxonomy.md/clusters.jsonl/
+                metrics.json in Name|Category|Description shape (§5). kmeans only so far.
 
 Usage
 -----
@@ -22,11 +27,13 @@ Usage
     # Smoke test end-to-end with NO API spend (stub embeddings/LLM, tiny sample):
     python run.py --dry-run --limit 500
 
-    # Real sweep:
+    # k-means (ENT-2261): sweep, then finalize a human-picked combo (runs stability):
     python run.py --stage sweep
-
-    # After a human picks a combo, finalize it (runs stability first):
     python run.py --stage finalize --select notes_weighted
+
+    # HDBSCAN (ENT-2289): normalize once (cached), then sweep:
+    python run.py --stage normalize
+    python run.py --stage sweep --method hdbscan
 """
 from __future__ import annotations
 
@@ -103,10 +110,30 @@ def load_or_build_records(args):
     return stage_records(args)
 
 
+def stage_normalize(args):
+    """§1.5 (ENT-2289) — LLM intent normalization. Batched + cached in
+    cache/normalize.jsonl; the hdbscan sweep consumes it automatically."""
+    from normalize import run_normalize_stage
+    load_or_build_records(args)          # guarantee cache/records.jsonl exists
+    log("Stage 1.5 — LLM intent normalization (§1.5)", section=True)
+    run_normalize_stage(args, log=log)
+
+
 def stage_sweep(args):
-    from sweep import run_sweep
     recs, meta = load_or_build_records(args)
-    log("Stage 2 — Field-combo sweep", section=True)
+    if args.method == "hdbscan":
+        from sweep_hdbscan import run_sweep_hdbscan
+        log("Stage 2 — UMAP + HDBSCAN sweep (ENT-2289)", section=True)
+        wcfg = {args.config: C.HDBSCAN_WEIGHTS[args.config]} if args.config else None
+        mcs = [args.min_cluster_size] if args.min_cluster_size else None
+        run_sweep_hdbscan(recs, meta["total_hours"], weight_configs=wcfg,
+                          min_cluster_sizes=mcs, dry_run=args.dry_run,
+                          allow_reducer_fallback=args.allow_reducer_fallback, log=log)
+        log(f"\nHuman review next: {C.RESULTS_DIR}/hdbscan_summary.json + "
+            f"{C.RESULTS_DIR}/hdbscan/configs/*.json → pick config*")
+        return
+    from sweep import run_sweep
+    log("Stage 2 — Field-combo sweep (k-means, ENT-2261)", section=True)
     combos = {args.combo: C.WEIGHT_VECTORS[args.combo]} if args.combo else None
     run_sweep(recs, meta["total_hours"], combos=combos, dry_run=args.dry_run,
               fixed_k=args.k, log=log)
@@ -122,8 +149,18 @@ def _load_combo_artifact(name: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def _reject_hdbscan_finalization(args, what: str) -> None:
+    if args.method == "hdbscan":
+        raise SystemExit(
+            f"{what} for --method hdbscan is not wired yet. HDBSCAN needs the §4 "
+            f"bootstrap/Jaccard stability check (not the k-means reseed-ARI one) "
+            f"and a §5 finalize that reads the hdbscan config-artifact shape. Use "
+            f"--method kmeans, or finalize the hdbscan artifact manually for v1.")
+
+
 def stage_stability(args):
     from stability import stability_check
+    _reject_hdbscan_finalization(args, "Stability")
     if not args.select:
         raise SystemExit("--select <combo> is required for the stability stage.")
     recs, _ = load_or_build_records(args)
@@ -135,6 +172,7 @@ def stage_stability(args):
 def stage_finalize(args):
     from stability import stability_check
     from finalize import finalize
+    _reject_hdbscan_finalization(args, "Finalize")
     if not args.select:
         raise SystemExit("--select <combo> is required for the finalize stage.")
     recs, meta = load_or_build_records(args)
@@ -150,6 +188,7 @@ def stage_finalize(args):
 STAGES = {
     "clean": stage_clean,
     "records": lambda a: stage_records(a),
+    "normalize": stage_normalize,
     "sweep": stage_sweep,
     "stability": stage_stability,
     "finalize": stage_finalize,
@@ -161,12 +200,21 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", choices=list(STAGES), default="sweep")
+    ap.add_argument("--method", choices=["kmeans", "hdbscan"], default="kmeans",
+                    help="clustering method for the sweep/stability/finalize stages: "
+                         "kmeans (ENT-2261, default) or hdbscan (ENT-2289)")
     ap.add_argument("--tickets", default=C.TICKETS_XLSX)
     ap.add_argument("--time-entries", default=C.TIME_ENTRIES_XLSX)
     ap.add_argument("--limit", type=int, default=None, help="cap kept tickets (smoke test)")
-    ap.add_argument("--combo", default=None, help="run only this one combo in the sweep")
+    ap.add_argument("--combo", default=None, help="kmeans: run only this one combo")
     ap.add_argument("--k", type=int, default=None,
-                    help="fixed k for KMeans; skips the silhouette k-sweep")
+                    help="kmeans: fixed k; skips the silhouette k-sweep")
+    ap.add_argument("--config", default=None,
+                    help="hdbscan: run only this one weight config (see C.HDBSCAN_WEIGHTS)")
+    ap.add_argument("--min-cluster-size", type=int, default=None,
+                    help="hdbscan: run only this min_cluster_size (else sweeps the list)")
+    ap.add_argument("--allow-reducer-fallback", action="store_true",
+                    help="hdbscan: use TruncatedSVD if umap-learn is missing (smoke tests only)")
     ap.add_argument("--select", default=None, help="combo* for stability/finalize")
     ap.add_argument("--dry-run", action="store_true",
                     help="stub embeddings + LLM (zero API spend)")
