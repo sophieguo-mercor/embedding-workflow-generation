@@ -212,6 +212,14 @@ STAGES = {
 
 
 def main():
+    # Load .env for EVERY stage. The clean/normalize batch stages already do this
+    # internally, but the sweep/stability/finalize stages build the OpenAI/Anthropic
+    # clients (which read keys from the environment only), so without this a real
+    # `run.py --stage sweep` fails even with the keys in .env. setdefault semantics:
+    # anything already exported wins.
+    from llm_clean import load_dotenv
+    load_dotenv()
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--stage", choices=list(STAGES), default="sweep")
