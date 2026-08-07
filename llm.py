@@ -94,7 +94,18 @@ class LLM:
             return {}
         if self.dry_run:
             return {n["id"]: "Uncategorized" for n in named}
-        out = self._call(prompts.CATEGORY_SYSTEM, prompts.build_category_user(named), max_tokens=3000)
+        # Output is one {id, category} per cluster, so max_tokens must scale with
+        # the cluster count — a fixed cap truncates the JSON for large sweeps (HDBSCAN
+        # can produce hundreds of clusters). k-means sizes stay near the old 3000.
+        max_tokens = min(16000, 1000 + 32 * len(named))
+        try:
+            out = self._call(prompts.CATEGORY_SYSTEM, prompts.build_category_user(named),
+                             max_tokens=max_tokens)
+        except Exception as e:
+            # Don't discard a completed run (naming/coverage/keywords) if the single
+            # category pass fails — fall back to "Other" for all; can be re-run later.
+            print(f"[llm] category assignment failed ({e}); defaulting all to 'Other'.")
+            return {}
         result: dict[int, str] = {}
         for item in out:
             try:
