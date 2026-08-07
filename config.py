@@ -49,7 +49,7 @@ WEIGHT_VECTORS: dict[str, tuple[float, float, float, float]] = {
     "all_equal":        (1.0, 1.0, 1.0, 1.0),
     "notes_weighted":   (0.3, 0.3, 1.0, 0.5),
     "semantic_no_cat":  (1.0, 1.0, 1.0, 0.0),
-    "title_desc_cat":   (1.0, 1.0, 0.0, 0.5),
+    "title_desc_cat":   (1.0, 1.0, 0.0, 1.0),
 }
 
 # ── k search range (§2 step 2) ───────────────────────────────────────────────
@@ -98,3 +98,20 @@ RESULTS_DIR = "results"
 TICKETS_XLSX = "data/Tickets Mercor v3.xlsx"
 TIME_ENTRIES_XLSX = "data/Time entries Mercor v3.xlsx"
 SYNONYMS_JSON = "synonyms.json"
+
+# Cleaned twins written by clean.py (§1.1): same schema, noise stripped from the
+# description / notes columns. Reusable downstream; the pipeline reads these when
+# run with `--use-cleaned`.
+CLEANED_DIR = "data/cleaned"
+CLEAN_TICKETS_XLSX = "data/cleaned/Tickets Mercor v3.cleaned.xlsx"
+CLEAN_TIME_ENTRIES_XLSX = "data/cleaned/Time entries Mercor v3.cleaned.xlsx"
+
+# ── LLM description cleaner (llm_clean.py, §1.1) ──────────────────────────────
+# Descriptions are cleaned by an Anthropic Message Batch (signatures / quoted
+# threads / footers removed by the model); notes stay deterministic (clean.py).
+BATCH_MODEL = LLM_MODEL                     # claude-sonnet-4-6
+BATCH_SIZE = 12                             # descriptions packed per batch request
+BATCH_CHAR_LIMIT = 1500                     # per-description char cap sent to the LLM
+BATCH_MAX_TOKENS = 4096                     # response cap per request
+DESC_CLEAN_CACHE = "cache/desc_clean.jsonl"        # {id, text} per cleaned ticket
+DESC_BATCH_MANIFEST = "cache/desc_batch_manifest.json"  # in-flight batch (resume)

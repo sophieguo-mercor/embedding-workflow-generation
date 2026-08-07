@@ -17,6 +17,7 @@ bake-off itself is out of scope here).
 
 | Stage | Module | What it does |
 |------|--------|--------------|
+| **0. Clean** (§1.1) | `llm_clean.py`, `clean.py` | *(optional)* Strip email boilerplate and write cleaned twins with identical schema (`data/cleaned/*.cleaned.xlsx`). **Descriptions** are cleaned by an **Anthropic Message Batch** (an LLM handles signatures / quoted threads / the fuzzy cases); **notes** stay deterministic regex. Reusable downstream; **read by default** by later stages (pass `--use-raw` to opt out). See [Text cleaning](#text-cleaning-11) below. |
 | **1. Records** (§1) | `records.py` | Join Tickets + Time-entries on `(instance, ticketnumber)`; one feature-ready record per ticket (`title`, `description`, `notes`, `issue_type`, `sub_issue_type`, `hours`, `touches`). Drops text-poor tickets; identifiers/dates/person-IDs never enter features. |
 | **1.4 Semantic block** | `embeddings.py` | Embed `title`/`description`/`notes` separately with OpenAI `text-embedding-3-large` (handles Dutch/English — no translation; reduced to 1024-d via the `dimensions` param). Cached per `(ticket_id, field)` so re-runs never re-embed. Token-aware batching keeps every request under OpenAI's per-request limit (budgets on `max(tiktoken, chars/4)` to match OpenAI's own upper-bound guard), with a split-and-retry fallback. |
 | **1.5 Categorical block** | `categorical.py`, `synonyms.json` | Normalize `issue_type`/`sub_issue_type` (rule-based canonicalization + curated synonym map), pool into namespaced tokens (`issue=… sub=…`), `TfidfVectorizer(min_df=2, smooth_idf=True)`, L2-normalize. |
@@ -42,6 +43,58 @@ big-enough clusters. A ticket's hours land in "Other" if it was dropped as
 text-poor (§1.2), its cluster is below the mass floor, or its cluster failed the
 coherence flag (§2.4). The denominator is the whole corpus (including dropped
 tickets), so coverage can't trivially sit near 100% for every combo.
+
+### Text cleaning (§1.1)
+
+The raw `description` column is an HTML-to-text **email dump**, not clean prose:
+measured on a 20k-row sample, ~42% carry double-encoded `_x000D_` escapes, ~29%
+an *"Incoming Email Processor"* footer, ~26% a signature block, ~17% inline-image
+refs, plus tracking-link wrappers and `????` mojibake. That boilerplate is
+**60–75% of the bytes**; the actual signal — the requester's ask / symptom /
+affected system — is a short block at the top (median ~274 chars). Left in, the
+signatures and quoted threads pull clustering toward *sender/company* instead of
+*issue*. The time-entry `summarynotes` / `internalnotes` are already clean
+engineer prose (the same patterns are <0.5% there).
+
+Cleaning splits by column, because the two need different tools:
+
+**Descriptions → an LLM (`llm_clean.py`, Anthropic Message Batch).** Signatures
+vary endlessly and ~8% of descriptions carry genuine quoted reply threads whose
+boundaries a regex gets wrong. The model is told to return only the requester's
+own wording — the ask, symptom, affected system / person / device — with
+signatures, quoted threads, footers, greetings, image refs and tracking URLs
+removed; keep the original Dutch/English (no translation, no summarising); return
+`""` if nothing substantive remains. Before sending, a cheap **deterministic
+prepass** (`clean.prepass_description`) strips encoded escapes, `[cid:]` refs and
+giant tracking URLs to cut tokens — but leaves signatures/threads for the model.
+
+The batch harness mirrors the sibling `resolution-extraction` pipeline and is
+resume-safe on two levels: `cache/desc_clean.jsonl` (ids already cleaned are
+skipped) and `cache/desc_batch_manifest.json` (an in-flight batch is reconnected,
+never re-submitted — no double-spend). It packs `BATCH_SIZE` (12) descriptions
+per request with a cache_control'd system prefix, polls to completion, and parses
+each response as `[{"id": pos, "text": "..."}]`. Empty/short descriptions are
+never sent (freebie path); a group whose JSON fails to parse falls back to the
+deterministic clean and can be re-submitted on a re-run. Illegal control chars in
+model output are stripped before writing (openpyxl rejects them).
+
+*Scale:* ~138k descriptions → ~11.5k requests in one batch; minutes-to-hours of
+(50%-priced) batch latency. Run `--dry-run` first for a free request/token
+estimate; `--sample N` for a cheap quality check.
+
+**Notes → deterministic regex (`clean.py`, no LLM, no network).** The time-entry
+notes are already clean, so they get a fast structural scrub: decode `_x000D_`
+escapes, strip `[cid:]`, unwrap `text<mailto:/tel:/http>` links, strip known HTML
+tags, fix `????` mojibake, collapse whitespace — **keeping** technical URLs
+(signal in an engineer's note). The same regex path is also the fallback for any
+description the LLM didn't cover.
+
+**Shared choices:** **PII is intentionally kept** for reuse fidelity — `pii.py`
+still redacts at publish time (§5.1). Nullish cells (`nan`/`none`/`null`) → `""`.
+The cleaned twins have the **same sheet (`Export`) and headers** as the raw
+exports, so the pipeline (and anything else) reads them unchanged; they live in
+`data/cleaned/` (git-ignored — still may contain PII). `ANTHROPIC_API_KEY` is
+read from the environment / `.env` only.
 
 ## Setup
 
@@ -72,11 +125,20 @@ Place the two Power BI exports in `data/` (git-ignored — large and may contain
 # End-to-end wiring smoke test on 500 tickets, ZERO API spend (stub embeddings/LLM):
 python run.py --dry-run --limit 500
 
-# Build records once (cached to cache/records.jsonl):
-python run.py --stage records
+# (Optional) Clean the raw exports → data/cleaned/*.cleaned.xlsx.
+#   Notes = deterministic regex; descriptions = Anthropic batch (needs ANTHROPIC_API_KEY).
+python run.py --stage clean --dry-run     # free: prompt + request/token estimate
+python run.py --stage clean --sample 24   # cheap quality check on 24 tickets
+python run.py --stage clean               # full run (~11.5k requests, batch-priced)
+python run.py --stage clean --collect     # reconnect to an in-flight batch and finish
+
+# Build records once (cached to cache/records.jsonl). The cache is source-aware:
+# it auto-rebuilds if you switch cleaned↔raw, re-clean the twins, or change --limit.
+# Reads the cleaned twins by default; add --use-raw to read the raw exports:
+python run.py --stage records [--use-raw]
 
 # Run the full field-combo sweep (needs both API keys):
-python run.py --stage sweep
+python run.py --stage sweep [--use-raw]
 
 #   → review results/sweep_summary.json + results/combos/*.json, pick combo*
 
@@ -85,9 +147,11 @@ python run.py --stage finalize --select notes_weighted
 
 # Tests (data-free, no API):
 python tests/test_pipeline.py
+python tests/test_clean.py
 ```
 
-`make smoke` / `make records` / `make sweep` / `make finalize COMBO=<name>` wrap these.
+`make preprocess` / `make smoke` / `make records [USE_RAW=1]` / `make sweep` /
+`make finalize COMBO=<name>` wrap these.
 
 ## Outputs (`results/`, git-ignored)
 
