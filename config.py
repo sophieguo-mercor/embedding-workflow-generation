@@ -83,6 +83,55 @@ LOW_ARI_THRESHOLD = 0.60        # mean pairwise ARI below this is flagged "unsta
 NAMING_NEAREST = 8              # centroid-nearest members shown to the namer
 NAMING_DIVERSE = 4              # plus a few diverse (far / random) members
 
+
+# ══ ENT-2289 — BERTopic-style sweep (UMAP + HDBSCAN) ══════════════════════════
+# A second clustering method, sharing this repo's feature blocks, LLM passes, and
+# the metrics.py scoring. Only the clustering core differs (see sweep_hdbscan.py).
+# Everything above (k-means, silhouette) is untouched and still ENT-2261's.
+
+# Feature blocks in weight order. `normalized_issue`/`normalized_resolution` are
+# the §1.5 intent-extraction fields — they light up once normalize.py populates
+# them on the records; until then, configs that need them are skipped (a config
+# is not silently clustered on empty text).
+BLOCKS_HDBSCAN = ("title", "description", "notes",
+                  "normalized_issue", "normalized_resolution", "cat")
+
+# The hand-picked weight configs (§2 step 1) — chosen to ABLATE what's in
+# question (normalization, categorical), not to grid-search. A block absent from
+# a dict is weight 0 (dropped, not concatenated). Each is swept over the
+# min-cluster-size list below → the full config set is their cross-product.
+HDBSCAN_WEIGHTS: dict[str, dict[str, float]] = {
+    "raw_only":               {"title": 1.0, "description": 1.0, "notes": 1.0},
+    "normalized_only":        {"normalized_issue": 1.0, "normalized_resolution": 1.0},
+    "normalized_categorical": {"normalized_issue": 1.0, "normalized_resolution": 1.0, "cat": 1.0},
+    "raw_categorical":        {"title": 1.0, "description": 1.0, "notes": 1.0, "cat": 1.0},
+    "all_equal":              {b: 1.0 for b in BLOCKS_HDBSCAN},
+}
+
+# min_cluster_size sweep (§2 step 3): "how many tickets before this is a real
+# workflow, not noise." Picked from business judgment, NOT a target count — this
+# method has no target k. Tune for the real ~154k-row corpus.
+HDBSCAN_MIN_CLUSTER_SIZES = (25, 50, 100)
+
+# ── UMAP reduction (§2 step 2) ────────────────────────────────────────────────
+# Reduce before clustering: compute at 154k rows + distance concentration in high
+# dims, and the standard pairing for HDBSCAN. Fixed seed ⇒ reproducible pipeline
+# (so Section 4 is a bootstrap check, not a reseed check).
+UMAP_N_COMPONENTS = 5
+UMAP_MIN_DIST = 0.0
+UMAP_METRIC = "cosine"
+UMAP_N_NEIGHBORS = 15
+UMAP_SEED = 42
+
+# ── c-TF-IDF keywords (§2 step 4) ─────────────────────────────────────────────
+CTFIDF_TOP_N = 10               # distinctive terms kept per cluster (auditable)
+
+# ── HDBSCAN naming sampling (§2 step 5) ───────────────────────────────────────
+# Density clusters have no centroid; sample by membership probability instead —
+# the principled analog of k-means' centroid-nearest heuristic.
+HDBSCAN_NAMING_EXEMPLARS = 8    # highest-probability members shown to the namer
+HDBSCAN_NAMING_DIVERSE = 4      # plus a few diverse members
+
 # ── Models ───────────────────────────────────────────────────────────────────
 EMBED_MODEL = "text-embedding-3-large"  # OpenAI; handles Dutch/English — no translation
 # text-embedding-3-large is natively 3072-d; we request a reduced 1024-d via the

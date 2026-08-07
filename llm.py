@@ -71,7 +71,8 @@ class LLM:
         raise RuntimeError(f"LLM call failed after {self.max_retries} attempts: {last_err}")
 
     # ── §2.4 name one cluster ───────────────────────────────────────────────
-    def name_cluster(self, samples: list[dict], *, cluster_id: int = 0) -> dict:
+    def name_cluster(self, samples: list[dict], *, cluster_id: int = 0,
+                     keywords: list[str] | None = None) -> dict:
         if self.dry_run:
             return {
                 "title": f"Cluster {cluster_id}",
@@ -79,7 +80,7 @@ class LLM:
                 "coherent": True,
                 "coherence_note": "",
             }
-        out = self._call(prompts.NAME_SYSTEM, prompts.build_name_user(samples))
+        out = self._call(prompts.NAME_SYSTEM, prompts.build_name_user(samples, keywords))
         return {
             "title": str(out.get("title", f"Cluster {cluster_id}")).strip(),
             "description": str(out.get("description", "")).strip(),

@@ -35,8 +35,10 @@ processes fused together (a coarse split), not one workflow. Judge only from thi
 sample. Output the JSON and nothing else."""
 
 
-def build_name_user(samples: list[dict]) -> str:
-    """samples: list of {title, issue_type, sub_issue_type, notes} for the cluster."""
+def build_name_user(samples: list[dict], keywords: list[str] | None = None) -> str:
+    """samples: list of {title, issue_type, sub_issue_type, notes} for the cluster.
+    keywords: optional distinctive c-TF-IDF terms for the cluster (ENT-2289 §2.5).
+    When omitted the prompt is identical to the ENT-2261 k-means naming call."""
     lines = ["Tickets in this cluster:\n"]
     for i, s in enumerate(samples, 1):
         lines.append(f"--- ticket {i} ---")
@@ -47,6 +49,10 @@ def build_name_user(samples: list[dict]) -> str:
             lines.append(f"labels: {cat}")
         if s.get("notes"):
             lines.append(f"notes: {s['notes'][:600]}")
+        lines.append("")
+    if keywords:
+        lines.append("Distinctive keywords for this cluster (c-TF-IDF, most "
+                     "characteristic terms): " + ", ".join(keywords))
         lines.append("")
     return "\n".join(lines)
 
