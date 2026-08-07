@@ -284,7 +284,10 @@ def run_config(name, weights, mcs, blocks, records, total_hours, llm, *,
             "qualifies": False,
             "examples": [s["title"] or s["notes"][:120] for s in samples[:3]],
         }
-        metrics.mark_qualification(cluster)     # §2.6 "Other" gate (shared)
+        # §2.6 "Other" gate (shared). Ticket-floor ALIGNED to mcs: every HDBSCAN
+        # cluster already has >= mcs tickets, so the count gate is consistent and
+        # the mass floor + coherence flag do the real gating.
+        metrics.mark_qualification(cluster, min_tickets=mcs)
         cluster["hours_frac"] = round(hours_frac, 4)
         clusters.append(cluster)
         named_for_cat.append({"id": cid, "title": named["title"], "description": named["description"]})

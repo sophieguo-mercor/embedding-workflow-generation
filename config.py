@@ -110,8 +110,20 @@ HDBSCAN_WEIGHTS: dict[str, dict[str, float]] = {
 
 # min_cluster_size sweep (§2 step 3): "how many tickets before this is a real
 # workflow, not noise." Picked from business judgment, NOT a target count — this
-# method has no target k. Tune for the real ~154k-row corpus.
-HDBSCAN_MIN_CLUSTER_SIZES = (25, 50, 100)
+# method has no target k. Calibrated to the workflow-size distribution of the
+# ~145k-ticket keyword taxonomy: the smallest genuine workflows there run ~130
+# tickets (p10 ~390, median ~1.5k), so a floor below ~100 would let HDBSCAN form
+# clusters smaller than any real workflow. 100 keeps essentially the whole tail;
+# 300 folds only the ~4 rarest workflows (<0.5% of tickets) toward noise.
+HDBSCAN_MIN_CLUSTER_SIZES = (100, 200, 300)
+
+# HDBSCAN qualification floor is ALIGNED to the active min_cluster_size, not the
+# fixed MIN_CLUSTER_TICKETS below: sweep_hdbscan passes min_tickets=mcs to
+# metrics.mark_qualification. Since HDBSCAN already guarantees every cluster has
+# >= mcs tickets, the ticket-count gate is then consistent-and-non-binding, and
+# the hours mass floor (MIN_CLUSTER_MASS_FRAC) + coherence flag are the real
+# post-hoc gates. (MIN_CLUSTER_TICKETS stays the k-means-only floor — it also caps
+# the k-means silhouette k-sweep, so it must not move.)
 
 # ── UMAP reduction (§2 step 2) ────────────────────────────────────────────────
 # Reduce before clustering: compute at 154k rows + distance concentration in high

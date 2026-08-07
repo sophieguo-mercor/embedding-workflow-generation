@@ -160,7 +160,9 @@ def finalize_hdbscan(
         "dataset_window": dataset_window,
         "records_meta": records_meta,
         "thresholds": {
-            "min_cluster_tickets": C.MIN_CLUSTER_TICKETS,
+            # HDBSCAN's ticket-floor is ALIGNED to this config's min_cluster_size
+            # (not the k-means-only MIN_CLUSTER_TICKETS), so record the aligned value.
+            "min_cluster_tickets": config_artifact["min_cluster_size"],
             "min_cluster_mass_frac": C.MIN_CLUSTER_MASS_FRAC,
             "min_cluster_size_sweep": list(C.HDBSCAN_MIN_CLUSTER_SIZES),
             "jaccard_stable": C.JACCARD_STABLE,
