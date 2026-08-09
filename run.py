@@ -128,6 +128,7 @@ def stage_sweep(args):
         mcs = [args.min_cluster_size] if args.min_cluster_size else None
         run_sweep_hdbscan(recs, meta["total_hours"], weight_configs=wcfg,
                           min_cluster_sizes=mcs, dry_run=args.dry_run,
+                          consolidate=not args.no_consolidate,
                           allow_reducer_fallback=args.allow_reducer_fallback, log=log)
         log(f"\nHuman review next: {C.RESULTS_DIR}/hdbscan_summary.json + "
             f"{C.RESULTS_DIR}/hdbscan/configs/*.json → pick config*")
@@ -238,6 +239,8 @@ def main():
                     help="hdbscan: run only this min_cluster_size (else sweeps the list)")
     ap.add_argument("--allow-reducer-fallback", action="store_true",
                     help="hdbscan: use TruncatedSVD if umap-learn is missing (smoke tests only)")
+    ap.add_argument("--no-consolidate", action="store_true",
+                    help="hdbscan: skip the §2.8 MECE consolidation pass (Opus) — cost control")
     ap.add_argument("--select", default=None, help="combo* for stability/finalize")
     ap.add_argument("--dry-run", action="store_true",
                     help="stub embeddings + LLM (zero API spend)")

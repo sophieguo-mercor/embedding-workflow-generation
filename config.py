@@ -164,6 +164,15 @@ EMBED_MODEL = "text-embedding-3-large"  # OpenAI; handles Dutch/English — no t
 EMBED_DIM = 1024
 LLM_MODEL = "claude-sonnet-4-6"         # naming / category / coherence judge
 
+# ── §2.8 MECE consolidation (post cluster pass) ───────────────────────────────
+# After a config is named/categorized, the fragmented micro-clusters are merged
+# into a MECE CATEGORY -> WORKFLOW taxonomy by ONE strong-model call (Opus). This
+# collapses HDBSCAN's near-duplicate clusters (many onboarding / RDS clusters) into
+# distinct workflows and routes vague/incoherent clusters to an explicit residual.
+CONSOLIDATE_MODEL = "claude-opus-4-8"   # strongest model — sees all clusters at once
+CONSOLIDATE_MIN_CLUSTERS = 25           # skip below this: nothing to consolidate
+CONSOLIDATE_MAX_TOKENS = 32000          # response cap (full 408-id partition + names)
+
 # ── Paths ────────────────────────────────────────────────────────────────────
 DATA_DIR = "data"
 CACHE_DIR = "cache"

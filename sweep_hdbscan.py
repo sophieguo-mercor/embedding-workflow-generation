@@ -50,6 +50,7 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.preprocessing import normalize
 
 import config as C
+import consolidate
 import metrics
 from categorical import build_categorical_block
 from embeddings import embed_field
@@ -237,7 +238,7 @@ def sample_cluster_members(labels, probs, cluster_id, records, rng) -> list[dict
 # ── one config end-to-end ─────────────────────────────────────────────────────
 
 def run_config(name, weights, mcs, blocks, records, total_hours, llm, *,
-               allow_reducer_fallback=False, out_dir, log=print) -> dict | None:
+               consolidator=None, allow_reducer_fallback=False, out_dir, log=print) -> dict | None:
     log(f"\n══ config '{name}'  mcs={mcs}  weights={dict(weights)} ══")
     X = combine(weights, blocks)
     if X is None:
@@ -307,6 +308,18 @@ def run_config(name, weights, mcs, blocks, records, total_hours, llm, *,
         f"llm_overall={llm_score['overall']:.1f}  clusters={len(clusters)}  "
         f"named={cov['n_named_clusters']}")
 
+    # §2.8 — MECE consolidation. Fold the fragmented micro-clusters into distinct
+    # CATEGORY -> WORKFLOW workflows (Opus). Skipped when there's nothing to merge
+    # (a handful of clusters) or the caller opted out (consolidator is None).
+    consolidation = None
+    if consolidator is not None and len(clusters) >= C.CONSOLIDATE_MIN_CLUSTERS:
+        log(f"  consolidating {len(clusters)} clusters into MECE workflows "
+            f"({consolidator.model}) …")
+        consolidation = consolidate.build_consolidation(consolidator, clusters, log=log)
+    elif consolidator is not None:
+        log(f"  skipping consolidation: {len(clusters)} clusters "
+            f"< CONSOLIDATE_MIN_CLUSTERS={C.CONSOLIDATE_MIN_CLUSTERS}")
+
     artifact = {
         "config": name,
         "weights": dict(weights),
@@ -319,6 +332,7 @@ def run_config(name, weights, mcs, blocks, records, total_hours, llm, *,
         "umap": {"n_components": C.UMAP_N_COMPONENTS, "metric": C.UMAP_METRIC,
                  "min_dist": C.UMAP_MIN_DIST, "n_neighbors": C.UMAP_N_NEIGHBORS,
                  "seed": C.UMAP_SEED},
+        "consolidation": consolidation,
         "clusters": clusters,
         "labels": labels.tolist(),      # ticket-order assignment (-1 == noise), for stability §4
     }
@@ -329,10 +343,11 @@ def run_config(name, weights, mcs, blocks, records, total_hours, llm, *,
 
 
 def run_sweep_hdbscan(records, total_hours, *, weight_configs=None,
-                      min_cluster_sizes=None, dry_run=False,
+                      min_cluster_sizes=None, dry_run=False, consolidate=True,
                       allow_reducer_fallback=False, out_dir=None, log=print) -> dict:
     """Run every (weight config × min_cluster_size) and write a side-by-side
-    summary (Section 3 input)."""
+    summary (Section 3 input). `consolidate` runs the §2.8 MECE merge per config
+    (Opus) after naming — set False to skip it (cost control)."""
     weight_configs = weight_configs or C.HDBSCAN_WEIGHTS
     min_cluster_sizes = min_cluster_sizes or C.HDBSCAN_MIN_CLUSTER_SIZES
     out_dir = out_dir or f"{C.RESULTS_DIR}/hdbscan/configs"
@@ -347,16 +362,22 @@ def run_sweep_hdbscan(records, total_hours, *, weight_configs=None,
     needed = sorted({b for w in weight_configs.values() for b, v in w.items() if v > 0})
     blocks = build_feature_blocks(records, needed, dry_run=dry_run, log=log)
     llm = LLM(dry_run=dry_run)
+    # Separate client for §2.8: the consolidation call wants the strongest model,
+    # not the sweep's cheap naming model. None ⇒ consolidation disabled entirely.
+    consolidator = LLM(model=C.CONSOLIDATE_MODEL, dry_run=dry_run) if consolidate else None
 
     summary = []
     for wname, weights in weight_configs.items():
         for mcs in min_cluster_sizes:
             cname = f"{wname}__mcs{mcs}"
             art = run_config(cname, weights, mcs, blocks, records, total_hours, llm,
+                             consolidator=consolidator,
                              allow_reducer_fallback=allow_reducer_fallback,
                              out_dir=out_dir, log=log)
             if art is None:
                 continue
+            csol = art.get("consolidation") or {}
+            csum = csol.get("summary") or {}
             summary.append({
                 "config": cname,
                 "weights": art["weights"],
@@ -368,18 +389,23 @@ def run_sweep_hdbscan(records, total_hours, *, weight_configs=None,
                 "coherence": art["llm_score"]["coherence"],
                 "distinctness": art["llm_score"]["distinctness"],
                 "llm_overall": art["llm_score"]["overall"],
+                "n_workflows": csum.get("n_workflows"),
+                "consolidated_classified_frac": csum.get("classified_hours_frac"),
             })
 
     summary.sort(key=lambda s: (-s["coverage"], -s["llm_overall"]))
     Path(f"{C.RESULTS_DIR}/hdbscan").mkdir(parents=True, exist_ok=True)
+    usage = {"naming": llm.usage}
+    if consolidator is not None:
+        usage["consolidation"] = consolidator.usage
     Path(f"{C.RESULTS_DIR}/hdbscan_summary.json").write_text(
-        json.dumps({"configs": summary, "llm_usage": llm.usage}, indent=2), encoding="utf-8")
+        json.dumps({"configs": summary, "llm_usage": usage}, indent=2), encoding="utf-8")
     log("\n── HDBSCAN sweep summary (Section 3 — human picks config*) ──")
     log(f"{'config':<26}{'clust':>6}{'cover':>8}{'noise':>8}{'named':>7}{'overall':>9}")
     for s in summary:
         log(f"{s['config']:<26}{s['n_clusters']:>6}{s['coverage']:>8.1%}"
             f"{s['noise_mass']:>8.1%}{s['n_named']:>7}{s['llm_overall']:>9.1f}")
-    return {"configs": summary, "llm_usage": llm.usage}
+    return {"configs": summary, "llm_usage": usage}
 
 
 if __name__ == "__main__":
@@ -395,6 +421,8 @@ if __name__ == "__main__":
                     help="run only this min_cluster_size (else sweeps the config list)")
     ap.add_argument("--dry-run", action="store_true",
                     help="stub embeddings + LLM (zero API spend)")
+    ap.add_argument("--no-consolidate", action="store_true",
+                    help="skip the §2.8 MECE consolidation pass (Opus) — cost control")
     ap.add_argument("--allow-reducer-fallback", action="store_true",
                     help="substitute TruncatedSVD if umap-learn is missing (smoke tests only)")
     args = ap.parse_args()
@@ -409,4 +437,5 @@ if __name__ == "__main__":
     wcfg = {args.config: C.HDBSCAN_WEIGHTS[args.config]} if args.config else None
     mcs_list = [args.min_cluster_size] if args.min_cluster_size else None
     run_sweep_hdbscan(recs, total_hours, weight_configs=wcfg, min_cluster_sizes=mcs_list,
-                      dry_run=args.dry_run, allow_reducer_fallback=args.allow_reducer_fallback)
+                      dry_run=args.dry_run, consolidate=not args.no_consolidate,
+                      allow_reducer_fallback=args.allow_reducer_fallback)

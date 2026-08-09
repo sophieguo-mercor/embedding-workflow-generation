@@ -70,6 +70,35 @@ class LLM:
             delay = min(delay * 1.6, 60)
         raise RuntimeError(f"LLM call failed after {self.max_retries} attempts: {last_err}")
 
+    def _call_streaming(self, system: str, user: str, *, max_tokens: int):
+        """Streaming variant of _call. Required by the SDK when max_tokens is large
+        (a non-streaming request that may exceed 10 min is rejected). Same parse
+        contract (strip fences -> json.loads) and same retry/usage accounting."""
+        delay, last_err = 2.0, None
+        for _ in range(self.max_retries):
+            try:
+                with self._client.messages.stream(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                ) as stream:
+                    text = "".join(stream.text_stream)
+                    final = stream.get_final_message()
+                self.usage["calls"] += 1
+                self.usage["input_tokens"] += final.usage.input_tokens
+                self.usage["output_tokens"] += final.usage.output_tokens
+                return json.loads(_strip_fences(text))
+            except json.JSONDecodeError as e:
+                last_err = f"bad JSON: {e}"
+            except Exception as e:
+                last_err = str(e)
+                if any(k in last_err.lower() for k in ("rate", "429", "overload")):
+                    delay = min(delay * 2, 60)
+            time.sleep(delay + random.uniform(0, 1))
+            delay = min(delay * 1.6, 60)
+        raise RuntimeError(f"streaming call failed after {self.max_retries} attempts: {last_err}")
+
     # ── §2.4 name one cluster ───────────────────────────────────────────────
     def name_cluster(self, samples: list[dict], *, cluster_id: int = 0,
                      keywords: list[str] | None = None) -> dict:
@@ -128,3 +157,37 @@ class LLM:
             "overall": float(out.get("overall", 0)),
             "notes": str(out.get("notes", "")).strip(),
         }
+
+    # ── §2.8 MECE consolidation (single big streaming call) ─────────────────
+    def consolidate_taxonomy(self, clusters: list[dict]) -> dict:
+        """Merge all named clusters into a CATEGORY -> WORKFLOW taxonomy. Returns the
+        raw {taxonomy, unclassified} dict (consolidate.py validates + repairs it).
+        dry_run → a stub that dumps every id into one workflow."""
+        if self.dry_run:
+            return {
+                "taxonomy": [{
+                    "category": "All (dry run)",
+                    "category_description": "Stub — no LLM call.",
+                    "workflows": [{
+                        "name": "All clusters (dry run)",
+                        "description": "Stub workflow holding every cluster.",
+                        "member_cluster_ids": [c["cluster_id"] for c in clusters],
+                        "merge_note": "dry run",
+                    }],
+                }],
+                "unclassified": {"member_cluster_ids": [], "note": "dry run"},
+            }
+        return self._call_streaming(prompts.CONSOLIDATE_SYSTEM,
+                                    prompts.build_consolidate_user(clusters),
+                                    max_tokens=C.CONSOLIDATE_MAX_TOKENS)
+
+    def place_missing_clusters(self, missing: list[int], clusters: list[dict],
+                               wf_index: list[dict]) -> list[dict]:
+        """Targeted follow-up: assign the ids the consolidation pass omitted to an
+        existing workflow name (or 'unclassified'). Returns [{id, workflow}]."""
+        if self.dry_run or not missing:
+            return []
+        out = self._call_streaming(prompts.PLACE_SYSTEM,
+                                   prompts.build_place_user(missing, clusters, wf_index),
+                                   max_tokens=4000)
+        return out.get("assignments", []) if isinstance(out, dict) else []
