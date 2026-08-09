@@ -131,7 +131,8 @@ centroid. `min_cluster_size` is also a natural expression of the mass-floor rule
 | **1.5 Normalize** *(new)* | `normalize.py` | One Anthropic Message-Batch call per ticket over `title` + cleaned `description`/`notes` → `normalized_issue` / `normalized_resolution` (English, consistent phrasing). The biggest new cost line (~154k tickets), so it's **batched + cached** in `cache/normalize.jsonl` and resume-safe (manifest reconnect) — paid once, reused by every sweep. See [Normalization](#normalization-15). |
 | **1.6 Semantic blocks** | `embeddings.py` | Same encoder; also embeds `normalized_issue` / `normalized_resolution`, cached per `(ticket_id, field)`. |
 | **2. Sweep** (§2) | `sweep_hdbscan.py` | Per config `(weight vector over 6 blocks, min_cluster_size)`: build the combined vector → **UMAP** → **HDBSCAN** → **c-TF-IDF** keywords per cluster → 1 LLM naming call (keywords passed alongside; members sampled by membership **probability**, not centroid) → batched category pass → shared coverage + LLM coherence + a separate **noise-mass** metric. |
-| **3. Human review** (§3) | `results/hdbscan_summary.json` | Configs side by side — coverage, LLM score, **noise mass**, cluster count, `min_cluster_size`, named clusters. A human picks `config*`. |
+| **2.8 Consolidate** (§2.8) *(new)* | `consolidate.py`, `sweep_hdbscan.py` | HDBSCAN over-fragments (the same process splits across many micro-clusters). After naming, one **Opus 4.8** call folds the config's clusters into a two-level MECE `CATEGORY → WORKFLOW` taxonomy; vague/incoherent clusters route to an explicit residual (the coherence flag is a *prior*, not a verdict). Deterministic repair guarantees a full partition of the cluster ids. Stored under the artifact's `consolidation` key. Gated at `CONSOLIDATE_MIN_CLUSTERS`; opt out with `--no-consolidate`. See [MECE consolidation](#mece-consolidation-28). |
+| **3. Human review** (§3) | `results/hdbscan_summary.json`, `configs_xlsx/*.xlsx` | Configs side by side — coverage, LLM score, **noise mass**, cluster count, `min_cluster_size`, plus the consolidated `n_workflows`/classified-fraction. Each config's `.xlsx` leads with a **`workflows`** sheet (the MECE view). A human picks `config*`. |
 | **4. Bootstrap stability** (§4) | `stability_hdbscan.py` | HDBSCAN is deterministic (UMAP seed fixed), so reseeding tests nothing. Instead resample tickets with replacement, re-cluster, and measure per-cluster **Jaccard** recovery (Hennig's `clusterboot`): `>0.75` stable, `0.60–0.75` doubtful, `<0.60` unstable. Low-stability clusters are **flagged, not dropped**. |
 | **5. Finalize** (§5) | `finalize.py` (`finalize_hdbscan`), `pii.py` | Same PII gate + `Name \| Category \| Description` freeze as k-means (shared writers), into `results/hdbscan/`. `clusters.jsonl` keeps the c-TF-IDF keywords + per-cluster stability verdict; `metrics.json` records config / weights / `min_cluster_size` / UMAP params + seed / model versions. |
 
@@ -179,6 +180,33 @@ isn't installed the sweep errors, unless you pass `--allow-reducer-fallback` —
 **linear TruncatedSVD** stand-in for wiring smoke tests only, recorded in the
 artifact's `backends` (never a silent downgrade). The `hdbscan` package
 auto-falls-back to scikit-learn's `HDBSCAN` if absent.
+
+### MECE consolidation (§2.8)
+
+Density clustering **over-fragments**: at `mcs100` the same recurring process is
+split across many micro-clusters (a dozen *new-user onboarding* clusters, several
+*RDS/Citrix* clusters, …), which tanks distinctness. §2.8 folds each config's named
+clusters into a two-level **MECE** `CATEGORY → WORKFLOW` taxonomy with **one Opus
+4.8 call** that sees every cluster at once (so it can enforce mutual exclusivity —
+batching can't). The per-cluster `category` from §2.5 is *withheld* so the merge is
+unsupervised, not anchored to the prior rollup.
+
+The coherence flag is passed as a **prior, not a verdict** (Option C): an
+incoherent cluster is placed in a workflow only if its description unambiguously
+names one process — otherwise it routes to a single `unclassified` residual
+**regardless of its hours**, so vague grab-bags don't masquerade as workflows. This
+is deliberately honest about coverage: on the full corpus roughly **half** of the
+clustered hours land in named workflows and the rest in the residual.
+
+Getting a clean partition of hundreds of ids from one call is unreliable, so
+`consolidate.py` **never regenerates** the whole answer: it takes the one call, then
+deterministically drops invented ids and de-dups (first-occurrence wins), makes a
+small **targeted** call to place only the clusters the model omitted, sends any
+leftovers to `unclassified`, and finally asserts every cluster id is assigned
+exactly once before persisting. Runs by default in the sweep (separate Opus client,
+its own `llm_usage` line); skipped below `CONSOLIDATE_MIN_CLUSTERS` (nothing to
+merge) or with `--no-consolidate`. To backfill existing config artifacts without
+re-clustering: `python merge_hdbscan_taxonomy.py --all`.
 
 ## Setup
 
@@ -233,9 +261,12 @@ python run.py --stage finalize --select notes_weighted   # stability (ARI) + PII
 python run.py --stage normalize --dry-run            # free request/token estimate
 python run.py --stage normalize --sample 24          # cheap quality check
 python run.py --stage normalize                      # full run (batch-priced, cached once)
-python run.py --stage sweep     --method hdbscan     #   → pick config* from the summary
+python run.py --stage sweep     --method hdbscan     #   naming + §2.8 MECE consolidation → pick config*
+python run.py --stage sweep     --method hdbscan --no-consolidate   # skip the Opus consolidation pass
 python run.py --stage finalize  --method hdbscan --select raw_categorical__mcs50
 #   hdbscan sweep/finalize also accept --config / --min-cluster-size / --allow-reducer-fallback
+python merge_hdbscan_taxonomy.py --all               # backfill §2.8 onto existing configs (patch JSON + xlsx)
+python to_excel_hdbscan.py                           # (re)export every config JSON → configs_xlsx/*.xlsx
 
 # Tests (data-free, no API):
 python tests/test_pipeline.py
@@ -255,8 +286,9 @@ python tests/test_clean.py
 - `taxonomy.md` / `clusters.jsonl` / `metrics.json` — the frozen rubric, per-cluster detail, and provenance.
 
 **HDBSCAN** (`results/hdbscan/`, so it never clobbers the k-means rubric):
-- `configs/<config>__mcs<n>.json` — per-config: named clusters + c-TF-IDF keywords, coverage, LLM scores, **noise mass**, `min_cluster_size`, UMAP params, backends, cluster labels (`-1` = noise).
-- `hdbscan_summary.json` — all configs side by side (adds noise mass) for human selection (§3).
+- `configs/<config>__mcs<n>.json` — per-config: named clusters + c-TF-IDF keywords, coverage, LLM scores, **noise mass**, `min_cluster_size`, UMAP params, backends, cluster labels (`-1` = noise), and the **`consolidation`** block (§2.8 MECE taxonomy + volume rollups + summary).
+- `configs_xlsx/<config>__mcs<n>.xlsx` — the same, as a workbook: a **`workflows`** sheet (the §2.8 MECE view, when present), a `clusters` sheet, and a `summary` sheet.
+- `hdbscan_summary.json` — all configs side by side (adds noise mass + consolidated `n_workflows`) for human selection (§3).
 - `stability.json` — per-cluster bootstrap **Jaccard** + verdict, and the flagged low-stability clusters (§4).
 - `taxonomy.md` / `clusters.jsonl` / `metrics.json` — same shape as k-means; `clusters.jsonl` also carries the keywords + per-cluster stability verdict, `metrics.json` the hdbscan provenance.
 
@@ -272,7 +304,10 @@ python tests/test_clean.py
 ## Notes on scope vs. the source pipeline
 
 Naming is simplified to **one** LLM call per cluster (+ one batched category
-pass), not the source pipeline's four passes, because this output is a one-shot,
-human-reviewed artifact — the reviewer absorbs the MECE-merge/naming-polish work.
-Category assignment stays a separate batched pass because it's the one step that
-needs cross-cluster visibility to reuse labels across related clusters.
+pass), not the source pipeline's four passes. The MECE-merge work the source
+pipeline folded into naming is instead a **separate §2.8 consolidation pass**
+(HDBSCAN only) that runs after clustering — keeping per-cluster naming cheap and
+parallel while still producing a de-duplicated workflow taxonomy; on the k-means
+track the human reviewer still absorbs that merge. Category assignment stays a
+separate batched pass because it's the one step that needs cross-cluster
+visibility to reuse labels across related clusters.
